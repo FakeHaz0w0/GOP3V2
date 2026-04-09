@@ -2,15 +2,17 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import aiohttp
+from aiohttp import web
 import asyncio
 import json
 import os
 import re
 import tempfile
+import threading
 from urllib.parse import urlparse
 
-# Token is injected by GitHub Actions from the repository secret DISCORD_TOKEN.
-# See .github/workflows/bot.yml — never hardcode this value.
+# Token is injected by GitHub Actions or Render from the repository secret DISCORD_TOKEN.
+# Never hardcode this value.
 TOKEN = os.environ.get("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError(
@@ -19,6 +21,24 @@ if not TOKEN:
         "  Settings → Secrets and variables → Actions → New repository secret\n"
         "  Name: DISCORD_TOKEN"
     )
+
+# ─────────────────────────────────────────────
+#  UptimeRobot keep-alive web server
+#  Render needs an HTTP endpoint to ping every 5 minutes
+# ─────────────────────────────────────────────
+def run_web():
+    async def handle(request):
+        return web.Response(text="Bot is alive!")
+    app = web.Application()
+    app.router.add_get("/", handle)
+    runner = web.AppRunner(app)
+    loop = asyncio.new_event_loop()
+    loop.run_until_complete(runner.setup())
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    loop.run_until_complete(site.start())
+    loop.run_forever()
+
+threading.Thread(target=run_web, daemon=True).start()
 
 # ─────────────────────────────────────────────
 #  Known NSFW domain blocklist
