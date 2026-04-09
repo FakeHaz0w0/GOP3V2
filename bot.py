@@ -3,15 +3,20 @@ from discord import app_commands
 from discord.ext import commands
 import aiohttp
 import asyncio
-import subprocess
 import json
 import os
 import tempfile
-from dotenv import load_dotenv
 
-load_dotenv()
-
-TOKEN = os.getenv("DISCORD_TOKEN")
+# Token is injected by GitHub Actions from the repository secret DISCORD_TOKEN.
+# See .github/workflows/bot.yml — never hardcode this value.
+TOKEN = os.environ.get("DISCORD_TOKEN")
+if not TOKEN:
+    raise RuntimeError(
+        "DISCORD_TOKEN environment variable is not set.\n"
+        "Add it as a repository secret in GitHub:\n"
+        "  Settings → Secrets and variables → Actions → New repository secret\n"
+        "  Name: DISCORD_TOKEN"
+    )
 
 # Per-guild NSFW moderation toggle  {guild_id: bool}
 nsfw_mod_enabled: dict[int, bool] = {}
