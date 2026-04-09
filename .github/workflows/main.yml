@@ -3,7 +3,7 @@ name: Discord Bot
 on:
   push:
     branches: [main]
-  workflow_dispatch:  # lets you start it manually from GitHub
+  workflow_dispatch:
 
 jobs:
   run-bot:
@@ -23,6 +23,9 @@ jobs:
         with:
           node-version: "20"
 
+      - name: Install system dependencies
+        run: sudo apt-get install -y libgl1 libglib2.0-0
+
       - name: Install Python dependencies
         run: pip install -r requirements.txt
 
@@ -33,8 +36,6 @@ jobs:
         run: |
           if [ -z "${{ secrets.DISCORD_TOKEN }}" ]; then
             echo "ERROR: DISCORD_TOKEN secret is not set."
-            echo "Go to: Settings → Secrets and variables → Actions → New repository secret"
-            echo "Name: DISCORD_TOKEN"
             exit 1
           fi
           echo "✅ DISCORD_TOKEN secret detected."
