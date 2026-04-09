@@ -1,0 +1,13 @@
+#!/bin/bash
+
+echo "🚀 Pushing to GitHub..."
+
+git add .
+
+read -p "Commit message (press Enter for 'update'): " msg
+msg=${msg:-update}
+
+git commit -m "$msg"
+git push
+
+echo "✅ Done! Check the Actions tab on GitHub."
