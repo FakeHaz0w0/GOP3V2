@@ -10,9 +10,9 @@ import re
 import tempfile
 import threading
 from urllib.parse import urlparse
+from nudenet import NudeDetector
 
 # Token is injected by GitHub Actions or Render from the repository secret DISCORD_TOKEN.
-# Never hardcode this value.
 TOKEN = os.environ.get("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError(
@@ -24,7 +24,6 @@ if not TOKEN:
 
 # ─────────────────────────────────────────────
 #  UptimeRobot keep-alive web server
-#  Render needs an HTTP endpoint to ping every 5 minutes
 # ─────────────────────────────────────────────
 def run_web():
     async def handle(request):
@@ -41,10 +40,23 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 
 # ─────────────────────────────────────────────
+#  NudeNet detector (loads once at startup)
+# ─────────────────────────────────────────────
+nude_detector = NudeDetector()
+
+# Body parts that trigger a deletion
+NUDE_LABELS = {
+    "FEMALE_BREAST_EXPOSED",
+    "FEMALE_GENITALIA_EXPOSED",
+    "MALE_GENITALIA_EXPOSED",
+    "ANUS_EXPOSED",
+    "BUTTOCKS_EXPOSED",
+}
+
+# ─────────────────────────────────────────────
 #  Known NSFW domain blocklist
 # ─────────────────────────────────────────────
 BLOCKED_DOMAINS = {
-    # Major adult sites
     "pornhub.com", "xvideos.com", "xnxx.com", "xhamster.com",
     "redtube.com", "youporn.com", "tube8.com", "spankbang.com",
     "eporner.com", "tnaflix.com", "porntrex.com", "beeg.com",
@@ -52,14 +64,11 @@ BLOCKED_DOMAINS = {
     "4tube.com", "porndig.com", "slutload.com", "thumbzilla.com",
     "cliphunter.com", "hardsextube.com", "pornone.com", "anysex.com",
     "upornia.com", "bravotube.net", "gotporn.com", "sunporno.com",
-    # Adult image boards
     "rule34.xxx", "rule34.paheal.net", "gelbooru.com",
     "danbooru.donmai.us", "e621.net", "hentai-foundry.com",
     "nhentai.net", "hentaihaven.xxx",
-    # Webcam / live
     "chaturbate.com", "cam4.com", "myfreecams.com", "livejasmin.com",
     "stripchat.com", "bongacams.com", "camsoda.com", "streamate.com",
-    # Subscription adult content
     "onlyfans.com", "fansly.com", "manyvids.com", "clips4sale.com",
     "naughtyamerica.com", "brazzers.com", "bangbros.com",
 }
@@ -67,7 +76,7 @@ BLOCKED_DOMAINS = {
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 URL_REGEX = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
-# Per-guild NSFW moderation toggle  {guild_id: bool}
+# Per-guild NSFW moderation toggle
 nsfw_mod_enabled: dict[int, bool] = {}
 
 intents = discord.Intents.default()
@@ -79,9 +88,24 @@ tree = bot.tree
 
 
 # ─────────────────────────────────────────────
-#  NSFW image check via nsfwjs (Node.js bridge)
+#  Scanner 1 — NudeNet (body part detection)
 # ─────────────────────────────────────────────
-async def check_nsfw(image_path: str) -> dict:
+def nudenet_is_nsfw(image_path: str) -> bool:
+    try:
+        detections = nude_detector.detect(image_path)
+        for d in detections:
+            if d.get("class") in NUDE_LABELS and d.get("score", 0) > 0.5:
+                return True
+        return False
+    except Exception as e:
+        print(f"[nudenet] error: {e}")
+        return False
+
+
+# ─────────────────────────────────────────────
+#  Scanner 2 — nsfwjs via Node.js bridge
+# ─────────────────────────────────────────────
+async def nsfwjs_check(image_path: str) -> dict:
     try:
         proc = await asyncio.create_subprocess_exec(
             "node", "nsfw_checker.js", image_path,
@@ -90,20 +114,39 @@ async def check_nsfw(image_path: str) -> dict:
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15)
         if proc.returncode != 0:
-            print(f"[nsfw_checker] stderr: {stderr.decode()}")
+            print(f"[nsfwjs] stderr: {stderr.decode()}")
             return {}
         return json.loads(stdout.decode())
     except Exception as e:
-        print(f"[nsfw_checker] error: {e}")
+        print(f"[nsfwjs] error: {e}")
         return {}
 
 
-def is_nsfw_result(predictions: dict) -> bool:
+def nsfwjs_is_nsfw(predictions: dict) -> bool:
     if not predictions:
         return False
     return predictions.get("Porn", 0) + predictions.get("Hentai", 0) > 0.60
 
 
+# ─────────────────────────────────────────────
+#  Combined scan — flags if EITHER scanner fires
+# ─────────────────────────────────────────────
+async def is_nsfw_image(image_path: str) -> bool:
+    # Run NudeNet first (faster, more accurate for nudity)
+    if nudenet_is_nsfw(image_path):
+        print(f"[scan] NudeNet flagged: {image_path}")
+        return True
+    # Fall back to nsfwjs
+    predictions = await nsfwjs_check(image_path)
+    if nsfwjs_is_nsfw(predictions):
+        print(f"[scan] nsfwjs flagged: {image_path}")
+        return True
+    return False
+
+
+# ─────────────────────────────────────────────
+#  Helpers
+# ─────────────────────────────────────────────
 def extract_domain(url: str) -> str:
     try:
         hostname = urlparse(url).hostname or ""
@@ -143,7 +186,7 @@ async def download_and_scan(url: str) -> bool:
         tmp_path = tmp.name
 
     try:
-        return is_nsfw_result(await check_nsfw(tmp_path))
+        return await is_nsfw_image(tmp_path)
     finally:
         os.unlink(tmp_path)
 
@@ -182,7 +225,7 @@ async def on_message(message: discord.Message):
                     tmp_path = tmp.name
 
                 try:
-                    if is_nsfw_result(await check_nsfw(tmp_path)):
+                    if await is_nsfw_image(tmp_path):
                         await message.delete()
                         await message.channel.send(
                             f"🚫 {message.author.mention} your image was removed "
@@ -196,7 +239,7 @@ async def on_message(message: discord.Message):
         # ── 2. URLs in message content ──
         for url in URL_REGEX.findall(message.content):
 
-            # 2a. Blocked domain — instant, no download needed
+            # 2a. Blocked domain — instant
             blocked = is_blocked_domain(url)
             if blocked:
                 await message.delete()
@@ -207,7 +250,7 @@ async def on_message(message: discord.Message):
                 )
                 return
 
-            # 2b. Direct image URL — download and scan with nsfwjs
+            # 2b. Direct image URL
             if url.lower().endswith(IMAGE_EXTENSIONS):
                 if await download_and_scan(url):
                     await message.delete()
