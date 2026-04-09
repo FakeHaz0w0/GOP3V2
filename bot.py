@@ -10,9 +10,17 @@ import re
 import tempfile
 import threading
 from urllib.parse import urlparse
-from nudenet import NudeDetector
 
-# Token is injected by GitHub Actions or Render from the repository secret DISCORD_TOKEN.
+# NudeNet import with friendly error
+try:
+    from nudenet import NudeDetector
+    nude_detector = NudeDetector()
+    NUDENET_AVAILABLE = True
+except ImportError:
+    print("[WARNING] nudenet not installed. Run: pip install nudenet")
+    NUDENET_AVAILABLE = False
+
+# Token
 TOKEN = os.environ.get("DISCORD_TOKEN")
 if not TOKEN:
     raise RuntimeError(
@@ -40,11 +48,8 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 
 # ─────────────────────────────────────────────
-#  NudeNet detector (loads once at startup)
+#  NudeNet body part labels to flag
 # ─────────────────────────────────────────────
-nude_detector = NudeDetector()
-
-# Body parts that trigger a deletion
 NUDE_LABELS = {
     "FEMALE_BREAST_EXPOSED",
     "FEMALE_GENITALIA_EXPOSED",
@@ -52,6 +57,30 @@ NUDE_LABELS = {
     "ANUS_EXPOSED",
     "BUTTOCKS_EXPOSED",
 }
+
+# ─────────────────────────────────────────────
+#  Keyword blocklist (text messages)
+#  Catches mentions of NSFW sites, slurs, and
+#  virtual/Roblox porn terms
+# ─────────────────────────────────────────────
+BLOCKED_KEYWORDS = [
+    # NSFW site names typed in chat
+    "pornhub", "xvideos", "xnxx", "xhamster", "onlyfans",
+    "chaturbate", "brazzers", "bangbros", "nhentai", "rule34",
+    "e621", "gelbooru", "hentaihaven",
+    # Virtual / Roblox porn terms
+    "roblox porn", "roblox sex", "roblox r34", "roblox rule34",
+    "roblox nsfw", "roblox nude", "roblox hentai",
+    "minecraft porn", "minecraft sex", "minecraft r34",
+    "fortnite porn", "fortnite sex", "fortnite r34",
+    "vrchat porn", "vrchat sex", "vrchat nsfw",
+    "gmod porn", "garrys mod porn",
+    "lego porn", "lego sex",
+    "cartoon porn", "cartoon sex", "drawn porn",
+    # Generic explicit terms
+    "send nudes", "send nude", "dick pic", "cock pic",
+    "nude pic", "nude photo", "naked pic",
+]
 
 # ─────────────────────────────────────────────
 #  Known NSFW domain blocklist
@@ -88,9 +117,11 @@ tree = bot.tree
 
 
 # ─────────────────────────────────────────────
-#  Scanner 1 — NudeNet (body part detection)
+#  Scanner 1 — NudeNet
 # ─────────────────────────────────────────────
 def nudenet_is_nsfw(image_path: str) -> bool:
+    if not NUDENET_AVAILABLE:
+        return False
     try:
         detections = nude_detector.detect(image_path)
         for d in detections:
@@ -103,7 +134,7 @@ def nudenet_is_nsfw(image_path: str) -> bool:
 
 
 # ─────────────────────────────────────────────
-#  Scanner 2 — nsfwjs via Node.js bridge
+#  Scanner 2 — nsfwjs (also catches virtual/drawn porn via Hentai class)
 # ─────────────────────────────────────────────
 async def nsfwjs_check(image_path: str) -> dict:
     try:
@@ -125,23 +156,35 @@ async def nsfwjs_check(image_path: str) -> dict:
 def nsfwjs_is_nsfw(predictions: dict) -> bool:
     if not predictions:
         return False
-    return predictions.get("Porn", 0) + predictions.get("Hentai", 0) > 0.60
+    # Lower Hentai threshold to 0.45 to catch virtual/Roblox-style porn
+    porn_score = predictions.get("Porn", 0)
+    hentai_score = predictions.get("Hentai", 0)
+    return porn_score > 0.60 or hentai_score > 0.45
 
 
 # ─────────────────────────────────────────────
-#  Combined scan — flags if EITHER scanner fires
+#  Combined image scan
 # ─────────────────────────────────────────────
 async def is_nsfw_image(image_path: str) -> bool:
-    # Run NudeNet first (faster, more accurate for nudity)
     if nudenet_is_nsfw(image_path):
         print(f"[scan] NudeNet flagged: {image_path}")
         return True
-    # Fall back to nsfwjs
     predictions = await nsfwjs_check(image_path)
     if nsfwjs_is_nsfw(predictions):
         print(f"[scan] nsfwjs flagged: {image_path}")
         return True
     return False
+
+
+# ─────────────────────────────────────────────
+#  Keyword check
+# ─────────────────────────────────────────────
+def contains_blocked_keyword(text: str) -> str | None:
+    lower = text.lower()
+    for keyword in BLOCKED_KEYWORDS:
+        if keyword in lower:
+            return keyword
+    return None
 
 
 # ─────────────────────────────────────────────
@@ -198,6 +241,7 @@ async def download_and_scan(url: str) -> bool:
 async def on_ready():
     await tree.sync()
     print(f"✅  Logged in as {bot.user} (ID: {bot.user.id})")
+    print(f"NudeNet available: {NUDENET_AVAILABLE}")
     print("Slash commands synced.")
 
 
@@ -210,7 +254,18 @@ async def on_message(message: discord.Message):
 
     if guild_id and nsfw_mod_enabled.get(guild_id, False):
 
-        # ── 1. Uploaded image attachments ──
+        # ── 1. Keyword check in message text ──
+        keyword = contains_blocked_keyword(message.content)
+        if keyword:
+            await message.delete()
+            await message.channel.send(
+                f"🚫 {message.author.mention} your message was removed "
+                f"because it contained blocked content.",
+                delete_after=8,
+            )
+            return
+
+        # ── 2. Uploaded image attachments ──
         for attachment in message.attachments:
             if attachment.filename.lower().endswith(IMAGE_EXTENSIONS):
                 async with aiohttp.ClientSession() as session:
@@ -236,10 +291,9 @@ async def on_message(message: discord.Message):
                 finally:
                     os.unlink(tmp_path)
 
-        # ── 2. URLs in message content ──
+        # ── 3. URLs in message content ──
         for url in URL_REGEX.findall(message.content):
 
-            # 2a. Blocked domain — instant
             blocked = is_blocked_domain(url)
             if blocked:
                 await message.delete()
@@ -250,7 +304,6 @@ async def on_message(message: discord.Message):
                 )
                 return
 
-            # 2b. Direct image URL
             if url.lower().endswith(IMAGE_EXTENSIONS):
                 if await download_and_scan(url):
                     await message.delete()
@@ -289,8 +342,5 @@ async def nsfwmoderation_error(interaction: discord.Interaction, error: app_comm
         )
 
 
-# ─────────────────────────────────────────────
-#  Run
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
     bot.run(TOKEN)
