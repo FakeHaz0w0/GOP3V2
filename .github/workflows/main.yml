@@ -1,0 +1,45 @@
+name: Discord Bot
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:  # lets you start it manually from GitHub
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Node.js dependencies
+        run: npm install
+
+      - name: Verify token secret is present
+        run: |
+          if [ -z "${{ secrets.DISCORD_TOKEN }}" ]; then
+            echo "ERROR: DISCORD_TOKEN secret is not set."
+            echo "Go to: Settings → Secrets and variables → Actions → New repository secret"
+            echo "Name: DISCORD_TOKEN"
+            exit 1
+          fi
+          echo "✅ DISCORD_TOKEN secret detected."
+
+      - name: Run bot
+        env:
+          DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
+        run: python bot.py
