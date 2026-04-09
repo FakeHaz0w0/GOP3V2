@@ -1,0 +1,17 @@
+{
+  "name": "discord-nsfw-checker",
+  "version": "1.0.0",
+  "description": "nsfwjs bridge for Discord bot",
+  "main": "nsfw_checker.js",
+  "scripts": {
+    "install-deps": "npm install"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs-node": "^4.17.0",
+    "jimp": "^0.22.12",
+    "nsfwjs": "^4.1.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
