@@ -31,27 +31,23 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN secret is not set.")
 if not SUPABASE_URL or not SUPABASE_KEY:
-    raise RuntimeError(
-        "SUPABASE_URL and SUPABASE_KEY secrets are not set.\n"
-        "Add them in GitHub: Settings → Secrets and variables → Actions"
-    )
+    raise RuntimeError("SUPABASE_URL and SUPABASE_KEY secrets are not set.")
 
-# ─────────────────────────────────────────────
-#  Supabase client
-# ─────────────────────────────────────────────
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ─────────────────────────────────────────────
-#  Database helpers
+#  Database helpers — fixed
 # ─────────────────────────────────────────────
 def get_setting(guild_id: int, key: str, default=False) -> bool:
     try:
         res = supabase.table("settings") \
-            .select(key) \
+            .select("*") \
             .eq("guild_id", str(guild_id)) \
             .execute()
-        if res.data:
-            return res.data[0].get(key, default)
+        if res.data and len(res.data) > 0:
+            val = res.data[0].get(key, default)
+            print(f"[db] get_setting guild={guild_id} {key}={val}")
+            return val
         return default
     except Exception as e:
         print(f"[db] get_setting error: {e}")
@@ -59,31 +55,45 @@ def get_setting(guild_id: int, key: str, default=False) -> bool:
 
 def set_setting(guild_id: int, key: str, value):
     try:
-        supabase.table("settings").upsert({
-            "guild_id": str(guild_id),
-            key: value
-        }).execute()
+        # Check if row exists first
+        res = supabase.table("settings") \
+            .select("guild_id") \
+            .eq("guild_id", str(guild_id)) \
+            .execute()
+        if res.data and len(res.data) > 0:
+            supabase.table("settings") \
+                .update({key: value}) \
+                .eq("guild_id", str(guild_id)) \
+                .execute()
+        else:
+            supabase.table("settings") \
+                .insert({"guild_id": str(guild_id), key: value}) \
+                .execute()
+        print(f"[db] set_setting guild={guild_id} {key}={value}")
     except Exception as e:
         print(f"[db] set_setting error: {e}")
 
 def add_warning(guild_id: int, user: discord.Member, reason: str | None) -> int:
     try:
+        # Insert the warning
         supabase.table("warnings").insert({
             "guild_id": str(guild_id),
             "user_id": str(user.id),
             "user_name": user.display_name,
             "reason": reason or "No reason given"
         }).execute()
-        # Count total warnings for this user in this guild
+        # Count all warnings for this user
         res = supabase.table("warnings") \
-            .select("user_id", count="exact") \
+            .select("user_id") \
             .eq("guild_id", str(guild_id)) \
             .eq("user_id", str(user.id)) \
             .execute()
-        return res.count or 1
+        count = len(res.data) if res.data else 1
+        print(f"[db] add_warning user={user.id} count={count}")
+        return count
     except Exception as e:
         print(f"[db] add_warning error: {e}")
-        return 0
+        return 1
 
 def get_warnings(guild_id: int) -> list:
     try:
@@ -282,8 +292,10 @@ async def on_message(message: discord.Message):
     if not guild_id:
         return
 
-    # Anti-slur
-    if get_setting(guild_id, "antislur"):
+    # Anti-slur (runs independently of NSFW mod)
+    antislur = get_setting(guild_id, "antislur")
+    print(f"[check] antislur={antislur} guild={guild_id}")
+    if antislur:
         found, slur_display = detect_slur(message.content)
         if found:
             await message.delete()
@@ -295,7 +307,9 @@ async def on_message(message: discord.Message):
             return
 
     # NSFW mod
-    if get_setting(guild_id, "nsfw"):
+    nsfw = get_setting(guild_id, "nsfw")
+    print(f"[check] nsfw={nsfw} guild={guild_id}")
+    if nsfw:
         if contains_blocked_keyword(message.content):
             await message.delete()
             await message.channel.send(
@@ -409,7 +423,6 @@ async def warnings(interaction: discord.Interaction):
         await interaction.response.send_message("✅ No warnings on record.", ephemeral=True)
         return
 
-    # Group by user
     users: dict[str, dict] = {}
     for row in rows:
         uid = row["user_id"]
@@ -428,7 +441,6 @@ async def warnings(interaction: discord.Interaction):
             value=f"**{len(data['reasons'])} warning(s)**\n{reasons}",
             inline=False
         )
-
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @warnings.error
