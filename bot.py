@@ -36,7 +36,7 @@ if not SUPABASE_URL or not SUPABASE_KEY:
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 # ─────────────────────────────────────────────
-#  Database helpers — fixed
+#  Database helpers
 # ─────────────────────────────────────────────
 def get_setting(guild_id: int, key: str, default=False) -> bool:
     try:
@@ -47,7 +47,8 @@ def get_setting(guild_id: int, key: str, default=False) -> bool:
         if res.data and len(res.data) > 0:
             val = res.data[0].get(key, default)
             print(f"[db] get_setting guild={guild_id} {key}={val}")
-            return val
+            return bool(val)
+        print(f"[db] get_setting guild={guild_id} {key}=no row found, returning {default}")
         return default
     except Exception as e:
         print(f"[db] get_setting error: {e}")
@@ -55,7 +56,6 @@ def get_setting(guild_id: int, key: str, default=False) -> bool:
 
 def set_setting(guild_id: int, key: str, value):
     try:
-        # Check if row exists first
         res = supabase.table("settings") \
             .select("guild_id") \
             .eq("guild_id", str(guild_id)) \
@@ -69,27 +69,26 @@ def set_setting(guild_id: int, key: str, value):
             supabase.table("settings") \
                 .insert({"guild_id": str(guild_id), key: value}) \
                 .execute()
-        print(f"[db] set_setting guild={guild_id} {key}={value}")
+        print(f"[db] set_setting guild={guild_id} {key}={value} ✅")
     except Exception as e:
         print(f"[db] set_setting error: {e}")
 
 def add_warning(guild_id: int, user: discord.Member, reason: str | None) -> int:
     try:
-        # Insert the warning
-        supabase.table("warnings").insert({
+        insert_res = supabase.table("warnings").insert({
             "guild_id": str(guild_id),
             "user_id": str(user.id),
             "user_name": user.display_name,
             "reason": reason or "No reason given"
         }).execute()
-        # Count all warnings for this user
+        print(f"[db] insert warning result: {insert_res.data}")
         res = supabase.table("warnings") \
             .select("user_id") \
             .eq("guild_id", str(guild_id)) \
             .eq("user_id", str(user.id)) \
             .execute()
         count = len(res.data) if res.data else 1
-        print(f"[db] add_warning user={user.id} count={count}")
+        print(f"[db] warning count for {user.id} = {count}")
         return count
     except Exception as e:
         print(f"[db] add_warning error: {e}")
@@ -102,6 +101,7 @@ def get_warnings(guild_id: int) -> list:
             .eq("guild_id", str(guild_id)) \
             .order("created_at", desc=False) \
             .execute()
+        print(f"[db] get_warnings guild={guild_id} rows={len(res.data or [])}")
         return res.data or []
     except Exception as e:
         print(f"[db] get_warnings error: {e}")
@@ -292,9 +292,8 @@ async def on_message(message: discord.Message):
     if not guild_id:
         return
 
-    # Anti-slur (runs independently of NSFW mod)
+    # Anti-slur
     antislur = get_setting(guild_id, "antislur")
-    print(f"[check] antislur={antislur} guild={guild_id}")
     if antislur:
         found, slur_display = detect_slur(message.content)
         if found:
@@ -308,7 +307,6 @@ async def on_message(message: discord.Message):
 
     # NSFW mod
     nsfw = get_setting(guild_id, "nsfw")
-    print(f"[check] nsfw={nsfw} guild={guild_id}")
     if nsfw:
         if contains_blocked_keyword(message.content):
             await message.delete()
@@ -416,11 +414,10 @@ async def warn_error(interaction, error):
 
 
 @tree.command(name="warnings", description="List all warnings for this server.")
-@app_commands.checks.has_permissions(moderate_members=True)
 async def warnings(interaction: discord.Interaction):
     rows = get_warnings(interaction.guild_id)
     if not rows:
-        await interaction.response.send_message("✅ No warnings on record.", ephemeral=True)
+        await interaction.response.send_message("✅ No warnings on record for this server.", ephemeral=False)
         return
 
     users: dict[str, dict] = {}
@@ -441,12 +438,7 @@ async def warnings(interaction: discord.Interaction):
             value=f"**{len(data['reasons'])} warning(s)**\n{reasons}",
             inline=False
         )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@warnings.error
-async def warnings_error(interaction, error):
-    if isinstance(error, app_commands.MissingPermissions):
-        await interaction.response.send_message("⛔ You need **Moderate Members** permission.", ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=False)
 
 
 if __name__ == "__main__":
