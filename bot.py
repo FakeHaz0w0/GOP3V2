@@ -27,11 +27,14 @@ except ImportError:
 TOKEN = os.environ.get("DISCORD_TOKEN")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 
 if not TOKEN:
     raise RuntimeError("DISCORD_TOKEN secret is not set.")
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("SUPABASE_URL and SUPABASE_KEY secrets are not set.")
+if not GEMINI_API_KEY:
+    raise RuntimeError("GEMINI_API_KEY secret is not set.")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
@@ -48,7 +51,7 @@ def get_setting(guild_id: int, key: str, default=False) -> bool:
             val = res.data[0].get(key, default)
             print(f"[db] get_setting guild={guild_id} {key}={val}")
             return bool(val)
-        print(f"[db] get_setting guild={guild_id} {key}=no row found, returning {default}")
+        print(f"[db] get_setting guild={guild_id} {key}=no row, returning {default}")
         return default
     except Exception as e:
         print(f"[db] get_setting error: {e}")
@@ -106,6 +109,33 @@ def get_warnings(guild_id: int) -> list:
     except Exception as e:
         print(f"[db] get_warnings error: {e}")
         return []
+
+# ─────────────────────────────────────────────
+#  Gemini AI helper
+# ─────────────────────────────────────────────
+async def ask_gemini(question: str) -> str:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [
+            {
+                "parts": [{"text": question}]
+            }
+        ]
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=aiohttp.ClientTimeout(total=20)
+            ) as resp:
+                data = await resp.json()
+                # Extract text from response
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        print(f"[gemini] error: {e}")
+        return "❌ Sorry, I couldn't get a response from Gemini right now."
 
 # ─────────────────────────────────────────────
 #  UptimeRobot keep-alive web server
@@ -293,8 +323,7 @@ async def on_message(message: discord.Message):
         return
 
     # Anti-slur
-    antislur = get_setting(guild_id, "antislur")
-    if antislur:
+    if get_setting(guild_id, "antislur"):
         found, slur_display = detect_slur(message.content)
         if found:
             await message.delete()
@@ -306,8 +335,7 @@ async def on_message(message: discord.Message):
             return
 
     # NSFW mod
-    nsfw = get_setting(guild_id, "nsfw")
-    if nsfw:
+    if get_setting(guild_id, "nsfw"):
         if contains_blocked_keyword(message.content):
             await message.delete()
             await message.channel.send(
@@ -417,7 +445,7 @@ async def warn_error(interaction, error):
 async def warnings(interaction: discord.Interaction):
     rows = get_warnings(interaction.guild_id)
     if not rows:
-        await interaction.response.send_message("✅ No warnings on record for this server.", ephemeral=False)
+        await interaction.response.send_message("✅ No warnings on record for this server.")
         return
 
     users: dict[str, dict] = {}
@@ -438,7 +466,24 @@ async def warnings(interaction: discord.Interaction):
             value=f"**{len(data['reasons'])} warning(s)**\n{reasons}",
             inline=False
         )
-    await interaction.response.send_message(embed=embed, ephemeral=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@tree.command(name="ask", description="Ask the AI anything!")
+@app_commands.describe(question="What do you want to ask?")
+async def ask(interaction: discord.Interaction, question: str):
+    # Defer so Discord doesn't time out while waiting for Gemini
+    await interaction.response.defer()
+    answer = await ask_gemini(question)
+    # Split if answer is too long for Discord (2000 char limit)
+    if len(answer) > 1900:
+        answer = answer[:1900] + "..."
+    embed = discord.Embed(
+        color=discord.Color.blue()
+    )
+    embed.add_field(name=f"❓ {question}", value=answer, inline=False)
+    embed.set_footer(text=f"Asked by {interaction.user.display_name} • Powered by Gemini")
+    await interaction.followup.send(embed=embed)
 
 
 if __name__ == "__main__":
