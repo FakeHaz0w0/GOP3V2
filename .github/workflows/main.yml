@@ -37,6 +37,7 @@ jobs:
           if [ -z "${{ secrets.DISCORD_TOKEN }}" ]; then echo "ERROR: DISCORD_TOKEN not set"; exit 1; fi
           if [ -z "${{ secrets.SUPABASE_URL }}" ]; then echo "ERROR: SUPABASE_URL not set"; exit 1; fi
           if [ -z "${{ secrets.SUPABASE_KEY }}" ]; then echo "ERROR: SUPABASE_KEY not set"; exit 1; fi
+          if [ -z "${{ secrets.GEMINI_API_KEY }}" ]; then echo "ERROR: GEMINI_API_KEY not set"; exit 1; fi
           echo "✅ All secrets detected."
 
       - name: Run bot
@@ -44,4 +45,5 @@ jobs:
           DISCORD_TOKEN: ${{ secrets.DISCORD_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python bot.py
